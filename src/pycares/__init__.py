@@ -13,11 +13,12 @@ import socket
 import math
 import threading
 import time
-import weakref
 from collections.abc import Callable, Iterable
 from contextlib import suppress
 from typing import Any, Callable, Optional, Dict, Union
 from queue import SimpleQueue
+
+
 
 IP4 = tuple[str, int]
 IP6 = tuple[str, int, int, int]
@@ -83,10 +84,91 @@ class AresError(Exception):
     pass
 
 
+
+class _ChannelShutdownManager:
+    """Manages channel destruction in a single background thread using SimpleQueue."""
+
+    def __init__(self) -> None:
+        self._queue: SimpleQueue = SimpleQueue()
+        self._thread: Optional[threading.Thread] = None
+        self._thread_started = False
+
+    def _run_safe_shutdown_loop(self) -> None:
+        """Process channel destruction requests from the queue."""
+        while True:
+            # Block forever until we get a channel to destroy
+            channel = self._queue.get()
+
+            # Sleep for 1 second to ensure c-ares has finished processing
+            # Its important that c-ares is past this critcial section
+            # so we use a delay to ensure it has time to finish processing
+            # https://github.com/c-ares/c-ares/blob/4f42928848e8b73d322b15ecbe3e8d753bf8734e/src/lib/ares_process.c#L1422
+            time.sleep(1.0)
+
+            # Destroy the channel
+            if _lib is not None and channel is not None:
+                _lib.ares_destroy(channel[0])
+
+    def destroy_channel(self, channel: "Channel") -> None:
+        """
+        Schedule channel destruction on the background thread with a safety delay.
+
+        Thread Safety and Synchronization:
+        This method uses SimpleQueue which is thread-safe for putting items
+        from multiple threads. The background thread processes channels
+        sequentially with a 1-second delay before each destruction.
+        """
+        # Put the channel in the queue
+        self._queue.put(channel)
+
+        # Start the background thread if not already started
+        if not self._thread_started:
+            self._thread_started = True
+            self._thread = threading.Thread(target=self._run_safe_shutdown_loop, daemon=True)
+            self._thread.start()
+
+
+
+class _ShutdownHandler:
+    """Prevents Unwanted performance caps and keeps things threadsafe""" 
+    _shudown_manager: "_ChannelShutdownManager"
+    "Global shutdown manager instance"
+
+    _handle_to_channel: Dict[Any, "Channel"]
+    "Maps handle to channel to prevent use-after-free"
+
+    def __init__(self):
+        self._handle_to_channel = {}
+        self._shutdown_manager = _ChannelShutdownManager()
+  
+
+# inpsired after asyncio's eventloop apporch,
+# This prevents shared threads from having acess 
+# to the same shutdown handle thus preventing overloads 
+# or unpredicted preformance caps.
+class _LocalShutdownHanler(threading.local):
+    handle: Optional[_ShutdownHandler] = None
+
+_running_handler = _LocalShutdownHanler()
+
+def _get_running_handle():
+    handle = _running_handler.handle
+    if handle is not None:
+        return handle
+    if handle is None:
+        # initalize a new handle
+        _running_handler.handle = _ShutdownHandler()
+    return handle
+
+def _get_handle_to_channel() -> Dict[Any, "Channel"]:
+    return _get_running_handle()._handle_to_channel
+
+def _get_shutdown_manager() -> _ChannelShutdownManager:
+    return _get_running_handle()._shutdown_manager
+
+
+
 # callback helpers
-
-_handle_to_channel: Dict[Any, "Channel"] = {}  # Maps handle to channel to prevent use-after-free
-
 
 @_ffi.def_extern()
 def _sock_state_cb(data, socket_fd, readable, writable):
@@ -100,6 +182,7 @@ def _sock_state_cb(data, socket_fd, readable, writable):
 @_ffi.def_extern()
 def _host_cb(arg, status, timeouts, hostent):
     # Get callback data without removing the reference yet
+    _handle_to_channel = _get_handle_to_channel()
     if _ffi is None or arg not in _handle_to_channel:
         return
 
@@ -117,6 +200,7 @@ def _host_cb(arg, status, timeouts, hostent):
 @_ffi.def_extern()
 def _nameinfo_cb(arg, status, timeouts, node, service):
     # Get callback data without removing the reference yet
+    _handle_to_channel = _get_handle_to_channel()
     if _ffi is None or arg not in _handle_to_channel:
         return
 
@@ -134,6 +218,7 @@ def _nameinfo_cb(arg, status, timeouts, node, service):
 @_ffi.def_extern()
 def _query_cb(arg, status, timeouts, abuf, alen):
     # Get callback data without removing the reference yet
+    _handle_to_channel = _get_handle_to_channel()
     if _ffi is None or arg not in _handle_to_channel:
         return
 
@@ -165,6 +250,7 @@ def _query_cb(arg, status, timeouts, abuf, alen):
 @_ffi.def_extern()
 def _addrinfo_cb(arg, status, timeouts, res):
     # Get callback data without removing the reference yet
+    _handle_to_channel = _get_handle_to_channel()
     if _ffi is None or arg not in _handle_to_channel:
         return
 
@@ -338,51 +424,12 @@ def parse_result(query_type, abuf, alen):
     return result, status
 
 
-class _ChannelShutdownManager:
-    """Manages channel destruction in a single background thread using SimpleQueue."""
-
-    def __init__(self) -> None:
-        self._queue: SimpleQueue = SimpleQueue()
-        self._thread: Optional[threading.Thread] = None
-        self._thread_started = False
-
-    def _run_safe_shutdown_loop(self) -> None:
-        """Process channel destruction requests from the queue."""
-        while True:
-            # Block forever until we get a channel to destroy
-            channel = self._queue.get()
-
-            # Sleep for 1 second to ensure c-ares has finished processing
-            # Its important that c-ares is past this critcial section
-            # so we use a delay to ensure it has time to finish processing
-            # https://github.com/c-ares/c-ares/blob/4f42928848e8b73d322b15ecbe3e8d753bf8734e/src/lib/ares_process.c#L1422
-            time.sleep(1.0)
-
-            # Destroy the channel
-            if _lib is not None and channel is not None:
-                _lib.ares_destroy(channel[0])
-
-    def destroy_channel(self, channel) -> None:
-        """
-        Schedule channel destruction on the background thread with a safety delay.
-
-        Thread Safety and Synchronization:
-        This method uses SimpleQueue which is thread-safe for putting items
-        from multiple threads. The background thread processes channels
-        sequentially with a 1-second delay before each destruction.
-        """
-        # Put the channel in the queue
-        self._queue.put(channel)
-
-        # Start the background thread if not already started
-        if not self._thread_started:
-            self._thread_started = True
-            self._thread = threading.Thread(target=self._run_safe_shutdown_loop, daemon=True)
-            self._thread.start()
 
 
-# Global shutdown manager instance
-_shutdown_manager = _ChannelShutdownManager()
+
+
+
+
 
 
 class Channel:
@@ -494,7 +541,7 @@ class Channel:
         r = _lib.ares_init_options(channel, options, optmask)
         if r != _lib.ARES_SUCCESS:
             raise AresError('Failed to initialize c-ares channel')
-
+        
         # Initialize all attributes for consistency
         self._event_thread = event_thread
         self._channel = channel
@@ -544,7 +591,8 @@ class Channel:
             raise RuntimeError("Channel is destroyed, no new queries allowed")
 
         userdata = _ffi.new_handle(callback_data)
-        _handle_to_channel[userdata] = self
+        handle = _get_running_handle()
+        handle._handle_to_channel[userdata] = self
         return userdata
 
     def cancel(self) -> None:
@@ -779,8 +827,9 @@ class Channel:
         # Can't start threads during interpreter shutdown
         # The channel will be cleaned up by the OS
         # TODO: Change to PythonFinalizationError when Python 3.12 support is dropped
+        manager = _get_shutdown_manager()
         with suppress(RuntimeError):
-            _shutdown_manager.destroy_channel(channel)
+            manager.destroy_channel(channel)
 
 
 
