@@ -142,8 +142,8 @@ class _ShutdownHandler:
         self._shutdown_manager = _ChannelShutdownManager()
   
 
-# inpsired after asyncio's eventloop apporch,
-# This prevents shared threads from having acess 
+# inpsired after asyncio's eventloop apporch
+# This prevents shared threads from having access 
 # to the same shutdown handle thus preventing overloads 
 # or unpredicted preformance caps.
 class _LocalShutdownHanler(threading.local):
