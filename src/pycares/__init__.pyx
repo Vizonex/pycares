@@ -541,6 +541,7 @@ cdef class Channel:
         
         # Return handle for use to utilizes 
         # wrapper like aiodns could utilize it
+        return handle
 
 
 
