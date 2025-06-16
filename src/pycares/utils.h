@@ -1,5 +1,5 @@
 /* 
-USing this implementation did not feel wrong at all.abort
+Using this implementation did not feel wrong at all.
 
 This source code utilizes some of msgspec's implementations for dealing with
 buffer extraction of unicode characters into a python buffer...
