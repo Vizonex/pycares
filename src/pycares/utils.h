@@ -66,7 +66,7 @@ extern "C" {
 #ifdef __GNUC__
 #define PYCARES_INLINE __attribute__((always_inline)) inline
 #define PYCARES_NOINLINE __attribute__((noinline))
-#elif defined(_pycaresC_VER)
+#elif defined(_MSVC_VER)
 #define PYCARES_INLINE __forceinline
 #define PYCARES_NOINLINE __declspec(noinline)
 #else
