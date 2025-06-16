@@ -131,7 +131,7 @@ cdef class AresError(Exception):
 # that it's not theadsafe, to get around that problem 
 # a new implementation was needed.
 
-
+# Held onto CFFI's bindings as a reference to look at incase I got lost - Vizonex
 
 # extern "Python" void _host_cb(void *arg,
 #                               int status,
