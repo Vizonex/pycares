@@ -539,8 +539,8 @@ cdef class Channel:
         
         pycares_release_buffer(&view)
         
-        # Return handle for use to utilizes 
-        # wrapper like aiodns could utilize it
+        # wrappers such as aiodns should be able to reference the 
+        # handle's id for wrapping in a future object if needed.
         return handle
 
 
